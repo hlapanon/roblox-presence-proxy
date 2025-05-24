@@ -1,19 +1,21 @@
-const functions = require('firebase-functions');
+const express = require('express');
 const axios = require('axios');
 
-exports.checkPlayerPresence = functions.https.onRequest(async (req, res) => {
+const app = express();
+app.use(express.json());
+
+// Enable CORS for Roblox HttpService
+app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'POST');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') {
     return res.status(200).send();
   }
+  next();
+});
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, error: 'Method not allowed' });
-  }
-
+app.post('/', async (req, res) => {
   const { username } = req.body;
 
   if (!username) {
@@ -21,6 +23,7 @@ exports.checkPlayerPresence = functions.https.onRequest(async (req, res) => {
   }
 
   try {
+    // Step 1: Get User ID from username
     const userResponse = await axios.get(`https://users.roblox.com/v1/usernames/users`, {
       data: { usernames: [username], excludeBannedUsers: true },
       headers: { 'Content-Type': 'application/json' }
@@ -33,6 +36,7 @@ exports.checkPlayerPresence = functions.https.onRequest(async (req, res) => {
 
     const userId = userData.id;
 
+    // Step 2: Check Presence
     const presenceResponse = await axios.post('https://presence.roblox.com/v1/presence/users', {
       userIds: [userId]
     }, {
@@ -44,6 +48,7 @@ exports.checkPlayerPresence = functions.https.onRequest(async (req, res) => {
       return res.status(200).json({ success: true, isInGame: false });
     }
 
+    // Step 3: Get Thumbnail
     const thumbnailResponse = await axios.get(`https://thumbnails.roblox.com/v1/places/gameicons?placeIds=${presence.placeId}&size=150x150&format=Png`);
     const thumbnailData = thumbnailResponse.data.data[0];
 
@@ -58,4 +63,10 @@ exports.checkPlayerPresence = functions.https.onRequest(async (req, res) => {
     console.error('Error:', error.message);
     return res.status(500).json({ success: false, error: `API error: ${error.message}` });
   }
+});
+
+// Start the server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });

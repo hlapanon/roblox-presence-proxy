@@ -49,7 +49,7 @@ app.post('/getUserInfo', async (req, res) => {
         const friendsCount = friendsCountResponse.data.count;
 
         const friendsResponse = await axios.get(`https://friends.roblox.com/v1/users/${userId}/friends`);
-        const friends = friendsResponse.data.data.slice(0, 5).map(friend => ({
+        const friends = friendsResponse.data.data.slice(0, 50).map(friend => ({
             id: friend.id,
             name: friend.name
         }));
@@ -69,6 +69,33 @@ app.post('/getUserInfo', async (req, res) => {
         const followersCount = followersResponse.data.count;
         const followingCount = followingResponse.data.count;
 
+        const premiumResponse = await axios.get(`https://premiumfeatures.roblox.com/v1/users/${userId}/validate-membership`);
+        const isPremium = premiumResponse.data;
+
+        const badgesResponse = await axios.get(`https://badges.roblox.com/v1/users/${userId}/badges`);
+        const badges = badgesResponse.data.data.map(badge => ({
+            id: badge.id,
+            name: badge.name,
+            description: badge.description,
+            icon: badge.iconImageUrl
+        }));
+
+        const inventoryAccessResponse = await axios.get(`https://inventory.roblox.com/v1/users/${userId}/can-view-inventory`);
+        const inventoryAccessible = inventoryAccessResponse.data.canView;
+
+        let inventory = [];
+        if (inventoryAccessible) {
+            const inventoryResponse = await axios.get(`https://inventory.roblox.com/v2/users/${userId}/inventory`, {
+                params: { assetTypes: 'Hat,Clothing,Accessory' }
+            });
+            inventory = inventoryResponse.data.data.map(item => ({
+                id: item.assetId,
+                name: item.name,
+                type: item.assetType,
+                icon: `https://thumbnails.roblox.com/v1/assets?assetIds=${item.assetId}&size=150x150&format=Png`
+            }));
+        }
+
         const presence = presenceResponse.data.userPresences[0];
         const isInGame = presence.userPresenceType === 2 && presence.placeId;
 
@@ -86,7 +113,11 @@ app.post('/getUserInfo', async (req, res) => {
             followersCount: followersCount,
             followingCount: followingCount,
             isInGame: isInGame,
-            placeId: isInGame ? presence.placeId : null
+            placeId: isInGame ? presence.placeId : null,
+            isPremium: isPremium,
+            badges: badges,
+            inventoryAccessible: inventoryAccessible,
+            inventory: inventory
         });
     } catch (error) {
         return res.status(500).json({ success: false, error: `API error: ${error.message}` });

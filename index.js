@@ -137,15 +137,15 @@ async function handleRequest(req, res) {
             () => makeApiCall('https://presence.roblox.com/v1/presence/users', 'post', { userIds: [userId] }),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends/count`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends`),
-            // Skip username-history due to frequent 429
+            // Skip username-history
             () => Promise.resolve({ success: true, data: { data: [] } }),
             () => makeApiCall(`https://groups.roblox.com/v1/users/${userId}/groups/roles`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followers/count`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followings/count`),
-            // Skip premium due to 401
+            // Skip premium
             () => Promise.resolve({ success: true, data: false }),
             () => makeApiCall(`https://badges.roblox.com/v1/users/${userId}/badges`),
-            // Skip can-view-inventory due to frequent 429
+            // Skip can-view-inventory
             () => Promise.resolve({ success: true, data: { canView: false } })
         ];
 
@@ -163,55 +163,60 @@ async function handleRequest(req, res) {
             inventoryAccess
         ] = await batchApiCalls(apiCalls, 1, 1000);
 
-        // Handle Failed API Calls
-        if (!userInfo.success) throw new Error(`User info failed: ${userInfo.error}`);
-        if (!presence.success) throw new Error(`Presence failed: ${presence.error}`);
-        if (!friendsCount.success) throw new Error(`Friends count failed: ${friendsCount.error}`);
-        if (!friends.success) throw new Error(`Friends list failed: ${friends.error}`);
-        if (!groups.success) throw new Error(`Groups failed: ${groups.error}`);
-        if (!followers.success) throw new Error(`Followers failed: ${followers.error}`);
-        if (!following.success) throw new Error(`Following failed: ${following.error}`);
-        if (!badges.success) throw new Error(`Badges failed: ${badges.error}`);
-
-        // Fallback for Optional APIs
+        // Handle Failed API Calls with Fallbacks
+        const userInfoData = userInfo.success ? userInfo.data : { created: 'N/A', description: '' };
+        const presenceData = presence.success ? presence.data.userPresences[0] : { userPresenceType: 0, lastOnline: 'N/A' };
+        const friendsCountData = friendsCount.success ? friendsCount.data : { count: 0 };
+        const friendsData = friends.success ? friends.data : { data: [] };
+        const groupsData = groups.success ? groups.data : { data: [] };
+        const followersData = followers.success ? followers.data : { count: 0 };
+        const followingData = following.success ? following.data : { count: 0 };
+        const badgesData = badges.success ? badges.data : { data: [] };
         const pastUsernamesData = pastUsernames.success ? pastUsernames.data : { data: [] };
         const inventoryAccessData = inventoryAccess.success ? inventoryAccess.data : { canView: false };
+        const isPremium = premium.success ? premium.data : false;
 
-        // Skip Inventory Fetch (Disabled due to 429)
+        // Log Failures
+        if (!userInfo.success) console.warn(`User info failed: ${userInfo.error}`);
+        if (!presence.success) console.warn(`Presence failed: ${presence.error}`);
+        if (!friendsCount.success) console.warn(`Friends count failed: ${friendsCount.error}`);
+        if (!friends.success) console.warn(`Friends list failed: ${friends.error}`);
+        if (!groups.success) console.warn(`Groups failed: ${groups.error}`);
+        if (!followers.success) console.warn(`Followers failed: ${followers.error}`);
+        if (!following.success) console.warn(`Following failed: ${following.error}`);
+        if (!badges.success) console.warn(`Badges failed: ${badges.error}`);
+
+        // Skip Inventory Fetch
         let inventory = [];
 
         // Process Presence
-        const presenceData = presence.data.userPresences[0];
         const isInGame = presenceData.userPresenceType === 2 && presenceData.placeId;
-
-        // Handle Premium Status
-        const isPremium = premium.data;
 
         // Build Response
         const response = {
             success: true,
             username: userData.name,
             userId: userId,
-            creationDate: userInfo.data.created,
-            description: userInfo.data.description,
+            creationDate: userInfoData.created,
+            description: userInfoData.description,
             lastOnline: presenceData.lastOnline,
-            friendsCount: friendsCount.data.count,
-            friends: friends.data.data.slice(0, 50).map(friend => ({
+            friendsCount: friendsCountData.count,
+            friends: friendsData.data.slice(0, 50).map(friend => ({
                 id: friend.id,
                 name: friend.name
             })),
             pastUsernames: pastUsernamesData.data.map(entry => entry.name),
-            groups: groups.data.data.map(group => ({
+            groups: groupsData.data.map(group => ({
                 id: group.group.id,
                 name: group.group.name,
                 role: group.role.name
             })),
-            followersCount: followers.data.count,
-            followingCount: following.data.count,
+            followersCount: followersData.count,
+            followingCount: followingData.count,
             isInGame: isInGame,
             placeId: isInGame ? presenceData.placeId : null,
             isPremium: isPremium,
-            badges: badges.data.data.map(badge => ({
+            badges: badgesData.data.map(badge => ({
                 id: badge.id,
                 name: badge.name,
                 description: badge.description,
@@ -242,6 +247,15 @@ app.post('/getUserInfo', (req, res) => {
         processQueue();
     });
 });
+
+// Cache Cleanup
+setInterval(() => {
+    for (const [key, value] of cache) {
+        if (Date.now() - value.timestamp > CACHE_DURATION) {
+            cache.delete(key);
+        }
+    }
+}, 60 * 1000);
 
 // Start Server
 const PORT = process.env.PORT || 10000;

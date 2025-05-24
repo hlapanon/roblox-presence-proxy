@@ -15,7 +15,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.post('/', async (req, res) => {
+app.post('/checkPlayerPresence', async (req, res) => {
   const { username } = req.body;
 
   if (!username) {
@@ -24,8 +24,10 @@ app.post('/', async (req, res) => {
 
   try {
     // Step 1: Get User ID from username
-    const userResponse = await axios.get(`https://users.roblox.com/v1/usernames/users`, {
-      data: { usernames: [username], excludeBannedUsers: true },
+    const userResponse = await axios.post('https://users.roblox.com/v1/usernames/users', {
+      usernames: [username],
+      excludeBannedUsers: true
+    }, {
       headers: { 'Content-Type': 'application/json' }
     });
 
@@ -60,13 +62,13 @@ app.post('/', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error:', error.message);
+    console.error('Error:', error.message, error.response ? error.response.status : 'No status');
     return res.status(500).json({ success: false, error: `API error: ${error.message}` });
   }
 });
 
 // Start the server
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

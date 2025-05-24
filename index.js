@@ -72,7 +72,6 @@ async function makeApiCall(url, method = 'get', data = null, retries = 3) {
                 if (attempt === retries) {
                     return { success: false, error: 'Rate limit exceeded', status: 429 };
                 }
-                // Exponential backoff: 2s, 4s, 8s
                 await delay(2000 * Math.pow(2, attempt - 1));
                 continue;
             }
@@ -137,16 +136,12 @@ async function handleRequest(req, res) {
             () => makeApiCall('https://presence.roblox.com/v1/presence/users', 'post', { userIds: [userId] }),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends/count`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends`),
-            // Skip username-history
-            () => Promise.resolve({ success: true, data: { data: [] } }),
+            () => Promise.resolve({ success: true, data: { data: [] } }), // Skip username-history
             () => makeApiCall(`https://groups.roblox.com/v1/users/${userId}/groups/roles`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followers/count`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followings/count`),
-            // Skip premium
-            () => Promise.resolve({ success: true, data: false }),
-            () => makeApiCall(`https://badges.roblox.com/v1/users/${userId}/badges`),
-            // Skip can-view-inventory
-            () => Promise.resolve({ success: true, data: { canView: false } })
+            () => Promise.resolve({ success: true, data: false }), // Skip premium
+            () => makeApiCall(`https://badges.roblox.com/v1/users/${userId}/badges`)
         ];
 
         const [
@@ -159,8 +154,7 @@ async function handleRequest(req, res) {
             followers,
             following,
             premium,
-            badges,
-            inventoryAccess
+            badges
         ] = await batchApiCalls(apiCalls, 1, 1000);
 
         // Handle Failed API Calls with Fallbacks
@@ -173,7 +167,6 @@ async function handleRequest(req, res) {
         const followingData = following.success ? following.data : { count: 0 };
         const badgesData = badges.success ? badges.data : { data: [] };
         const pastUsernamesData = pastUsernames.success ? pastUsernames.data : { data: [] };
-        const inventoryAccessData = inventoryAccess.success ? inventoryAccess.data : { canView: false };
         const isPremium = premium.success ? premium.data : false;
 
         // Log Failures
@@ -185,9 +178,6 @@ async function handleRequest(req, res) {
         if (!followers.success) console.warn(`Followers failed: ${followers.error}`);
         if (!following.success) console.warn(`Following failed: ${following.error}`);
         if (!badges.success) console.warn(`Badges failed: ${badges.error}`);
-
-        // Skip Inventory Fetch
-        let inventory = [];
 
         // Process Presence
         const isInGame = presenceData.userPresenceType === 2 && presenceData.placeId;
@@ -201,7 +191,7 @@ async function handleRequest(req, res) {
             description: userInfoData.description,
             lastOnline: presenceData.lastOnline,
             friendsCount: friendsCountData.count,
-            friends: friendsData.data.slice(0, 50).map(friend => ({
+            friends: friendsData.data.map(friend => ({
                 id: friend.id,
                 name: friend.name
             })),
@@ -216,14 +206,13 @@ async function handleRequest(req, res) {
             isInGame: isInGame,
             placeId: isInGame ? presenceData.placeId : null,
             isPremium: isPremium,
+            badgesCount: badgesData.data.length,
             badges: badgesData.data.map(badge => ({
                 id: badge.id,
                 name: badge.name,
                 description: badge.description,
                 icon: badge.iconImageUrl
-            })),
-            inventoryAccessible: inventoryAccessData.canView,
-            inventory: inventory
+            }))
         };
 
         // Cache Response

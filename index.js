@@ -21,6 +21,29 @@ const axiosInstance = axios.create({
     headers: { 'Content-Type': 'application/json' }
 });
 
+// Request Queue to Prevent Overload
+const requestQueue = [];
+let isProcessing = false;
+
+async function processQueue() {
+    if (isProcessing || requestQueue.length === 0) return;
+    isProcessing = true;
+    const { req, res, resolve } = requestQueue.shift();
+    try {
+        await handleRequest(req, res);
+        resolve();
+    } catch (error) {
+        console.error('Queue processing error:', error);
+        res.status(500).json({ success: false, error: `Queue error: ${error.message}` });
+        resolve();
+    }
+    isProcessing = false;
+    await processQueue();
+}
+
+// Utility to Add Delay
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // API Call with Retry Logic
 async function makeApiCall(url, method = 'get', data = null, retries = 3) {
     for (let attempt = 1; attempt <= retries; attempt++) {
@@ -39,19 +62,37 @@ async function makeApiCall(url, method = 'get', data = null, retries = 3) {
                 data: error.response?.data
             });
             if (status === 401) {
-                // Handle 401 Unauthorized by returning a fallback
                 return { success: false, error: 'Unauthorized', status: 401 };
             }
-            if (attempt === retries || status !== 429) {
-                throw error;
+            if (status === 429) {
+                if (attempt === retries) {
+                    return { success: false, error: 'Rate limit exceeded', status: 429 };
+                }
+                // Exponential backoff: 2s, 4s, 8s
+                await delay(2000 * Math.pow(2, attempt - 1));
+                continue;
             }
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            throw error;
         }
     }
 }
 
-// Main Endpoint
-app.post('/getUserInfo', async (req, res) => {
+// Batch API Calls with Throttling
+async function batchApiCalls(calls, batchSize = 2, delayMs = 500) {
+    const results = [];
+    for (let i = 0; i < calls.length; i += batchSize) {
+        const batch = calls.slice(i, i + batchSize);
+        const batchResults = await Promise.all(batch.map(call => call()));
+        results.push(...batchResults);
+        if (i + batchSize < calls.length) {
+            await delay(delayMs);
+        }
+    }
+    return results;
+}
+
+// Handle Individual Request
+async function handleRequest(req, res) {
     const { username } = req.body;
     if (!username) {
         console.error('Missing username in request body');
@@ -77,7 +118,22 @@ app.post('/getUserInfo', async (req, res) => {
         }
         const userId = userData.id;
 
-        // Parallel API Calls
+        // Batch API Calls
+        const apiCalls = [
+            () => makeApiCall(`https://users.roblox.com/v1/users/${userId}`),
+            () => makeApiCall('https://presence.roblox.com/v1/presence/users', 'post', { userIds: [userId] }),
+            () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends/count`),
+            () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends`),
+            () => makeApiCall(`https://users.roblox.com/v1/users/${userId}/username-history`),
+            () => makeApiCall(`https://groups.roblox.com/v1/users/${userId}/groups/roles`),
+            () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followers/count`),
+            () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followings/count`),
+            // Skip premium due to 401
+            () => Promise.resolve({ success: true, data: false }),
+            () => makeApiCall(`https://badges.roblox.com/v1/users/${userId}/badges`),
+            () => makeApiCall(`https://inventory.roblox.com/v1/users/${userId}/can-view-inventory`)
+        ];
+
         const [
             userInfo,
             presence,
@@ -90,35 +146,25 @@ app.post('/getUserInfo', async (req, res) => {
             premium,
             badges,
             inventoryAccess
-        ] = await Promise.all([
-            makeApiCall(`https://users.roblox.com/v1/users/${userId}`),
-            makeApiCall('https://presence.roblox.com/v1/presence/users', 'post', { userIds: [userId] }),
-            makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends/count`),
-            makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends`),
-            makeApiCall(`https://users.roblox.com/v1/users/${userId}/username-history`),
-            makeApiCall(`https://groups.roblox.com/v1/users/${userId}/groups/roles`),
-            makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followers/count`),
-            makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followings/count`),
-            makeApiCall(`https://premiumfeatures.roblox.com/v1/users/${userId}/validate-membership`),
-            makeApiCall(`https://badges.roblox.com/v1/users/${userId}/badges`),
-            makeApiCall(`https://inventory.roblox.com/v1/users/${userId}/can-view-inventory`)
-        ]);
+        ] = await batchApiCalls(apiCalls, 2, 500);
 
-        // Check for failed API calls
+        // Handle Failed API Calls
         if (!userInfo.success) throw new Error(`User info failed: ${userInfo.error}`);
         if (!presence.success) throw new Error(`Presence failed: ${presence.error}`);
         if (!friendsCount.success) throw new Error(`Friends count failed: ${friendsCount.error}`);
         if (!friends.success) throw new Error(`Friends list failed: ${friends.error}`);
-        if (!pastUsernames.success) throw new Error(`Past usernames failed: ${pastUsernames.error}`);
         if (!groups.success) throw new Error(`Groups failed: ${groups.error}`);
         if (!followers.success) throw new Error(`Followers failed: ${followers.error}`);
         if (!following.success) throw new Error(`Following failed: ${following.error}`);
         if (!badges.success) throw new Error(`Badges failed: ${badges.error}`);
-        if (!inventoryAccess.success) throw new Error(`Inventory access failed: ${inventoryAccess.error}`);
+
+        // Fallback for Optional APIs
+        const pastUsernamesData = pastUsernames.success ? pastUsernames.data : { data: [] };
+        const inventoryAccessData = inventoryAccess.success ? inventoryAccess.data : { canView: false };
 
         // Fetch Inventory if Accessible
         let inventory = [];
-        if (inventoryAccess.data.canView) {
+        if (inventoryAccessData.canView) {
             try {
                 const inventoryResponse = await makeApiCall(
                     `https://inventory.roblox.com/v2/users/${userId}/inventory`,
@@ -145,7 +191,7 @@ app.post('/getUserInfo', async (req, res) => {
         const isInGame = presenceData.userPresenceType === 2 && presenceData.placeId;
 
         // Handle Premium Status
-        const isPremium = premium.success ? premium.data : false;
+        const isPremium = premium.data;
 
         // Build Response
         const response = {
@@ -160,7 +206,7 @@ app.post('/getUserInfo', async (req, res) => {
                 id: friend.id,
                 name: friend.name
             })),
-            pastUsernames: pastUsernames.data.data.map(entry => entry.name),
+            pastUsernames: pastUsernamesData.data.map(entry => entry.name),
             groups: groups.data.data.map(group => ({
                 id: group.group.id,
                 name: group.group.name,
@@ -177,7 +223,7 @@ app.post('/getUserInfo', async (req, res) => {
                 description: badge.description,
                 icon: badge.iconImageUrl
             })),
-            inventoryAccessible: inventoryAccess.data.canView,
+            inventoryAccessible: inventoryAccessData.canView,
             inventory: inventory
         };
 
@@ -191,6 +237,14 @@ app.post('/getUserInfo', async (req, res) => {
         });
         return res.status(500).json({ success: false, error: `Internal server error: ${error.message}` });
     }
+}
+
+// Main Endpoint with Queue
+app.post('/getUserInfo', (req, res) => {
+    new Promise(resolve => {
+        requestQueue.push({ req, res, resolve });
+        processQueue();
+    });
 });
 
 // Start Server

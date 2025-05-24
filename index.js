@@ -21,6 +21,10 @@ const axiosInstance = axios.create({
     headers: { 'Content-Type': 'application/json' }
 });
 
+// In-Memory Cache
+const cache = new Map();
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
 // Request Queue to Prevent Overload
 const requestQueue = [];
 let isProcessing = false;
@@ -72,13 +76,13 @@ async function makeApiCall(url, method = 'get', data = null, retries = 3) {
                 await delay(2000 * Math.pow(2, attempt - 1));
                 continue;
             }
-            throw error;
+            return { success: false, error: error.message, status: status || 500 };
         }
     }
 }
 
 // Batch API Calls with Throttling
-async function batchApiCalls(calls, batchSize = 2, delayMs = 500) {
+async function batchApiCalls(calls, batchSize = 1, delayMs = 1000) {
     const results = [];
     for (let i = 0; i < calls.length; i += batchSize) {
         const batch = calls.slice(i, i + batchSize);
@@ -97,6 +101,15 @@ async function handleRequest(req, res) {
     if (!username) {
         console.error('Missing username in request body');
         return res.status(400).json({ success: false, error: 'Username is required' });
+    }
+
+    // Check Cache
+    if (cache.has(username)) {
+        const cached = cache.get(username);
+        if (Date.now() - cached.timestamp < CACHE_DURATION) {
+            console.log(`Returning cached response for ${username}`);
+            return res.status(200).json(cached.data);
+        }
     }
 
     try {
@@ -118,20 +131,22 @@ async function handleRequest(req, res) {
         }
         const userId = userData.id;
 
-        // Batch API Calls
+        // Batch API Calls (Reduced Endpoints)
         const apiCalls = [
             () => makeApiCall(`https://users.roblox.com/v1/users/${userId}`),
             () => makeApiCall('https://presence.roblox.com/v1/presence/users', 'post', { userIds: [userId] }),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends/count`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/friends`),
-            () => makeApiCall(`https://users.roblox.com/v1/users/${userId}/username-history`),
+            // Skip username-history due to frequent 429
+            () => Promise.resolve({ success: true, data: { data: [] } }),
             () => makeApiCall(`https://groups.roblox.com/v1/users/${userId}/groups/roles`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followers/count`),
             () => makeApiCall(`https://friends.roblox.com/v1/users/${userId}/followings/count`),
             // Skip premium due to 401
             () => Promise.resolve({ success: true, data: false }),
             () => makeApiCall(`https://badges.roblox.com/v1/users/${userId}/badges`),
-            () => makeApiCall(`https://inventory.roblox.com/v1/users/${userId}/can-view-inventory`)
+            // Skip can-view-inventory due to frequent 429
+            () => Promise.resolve({ success: true, data: { canView: false } })
         ];
 
         const [
@@ -146,7 +161,7 @@ async function handleRequest(req, res) {
             premium,
             badges,
             inventoryAccess
-        ] = await batchApiCalls(apiCalls, 2, 500);
+        ] = await batchApiCalls(apiCalls, 1, 1000);
 
         // Handle Failed API Calls
         if (!userInfo.success) throw new Error(`User info failed: ${userInfo.error}`);
@@ -162,29 +177,8 @@ async function handleRequest(req, res) {
         const pastUsernamesData = pastUsernames.success ? pastUsernames.data : { data: [] };
         const inventoryAccessData = inventoryAccess.success ? inventoryAccess.data : { canView: false };
 
-        // Fetch Inventory if Accessible
+        // Skip Inventory Fetch (Disabled due to 429)
         let inventory = [];
-        if (inventoryAccessData.canView) {
-            try {
-                const inventoryResponse = await makeApiCall(
-                    `https://inventory.roblox.com/v2/users/${userId}/inventory`,
-                    'get',
-                    { params: { assetTypes: 'Hat,Clothing,Accessory' } }
-                );
-                if (inventoryResponse.success) {
-                    inventory = inventoryResponse.data.data.map(item => ({
-                        id: item.assetId,
-                        name: item.name,
-                        type: item.assetType,
-                        icon: `https://thumbnails.roblox.com/v1/assets?assetIds=${item.assetId}&size=150x150&format=Png`
-                    }));
-                } else {
-                    console.error(`Inventory fetch failed for user ${userId}: ${inventoryResponse.error}`);
-                }
-            } catch (error) {
-                console.error(`Failed to fetch inventory for user ${userId}:`, error.message);
-            }
-        }
 
         // Process Presence
         const presenceData = presence.data.userPresences[0];
@@ -227,7 +221,9 @@ async function handleRequest(req, res) {
             inventory: inventory
         };
 
-        console.log(`Successfully processed request for ${username}`);
+        // Cache Response
+        cache.set(username, { data: response, timestamp: Date.now() });
+        console.log(`Successfully processed and cached request for ${username}`);
         return res.status(200).json(response);
     } catch (error) {
         console.error('Internal server error for username:', username, {

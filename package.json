@@ -1,11 +1,11 @@
 {
-    "name": "roblox-user-info-proxy",
-    "version": "1.0.0",
-    "dependencies": {
-        "axios": "^1.7.2",
-        "express": "^4.19.2"
-    },
-    "scripts": {
-        "start": "node index.js"
-    }
+  "name": "roblox-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2"
+  }
 }
